@@ -385,10 +385,13 @@ def build_context_bundle(
             continue
         base_state_norm = base_state.strip().upper()
         mask = state_names == base_state_norm
-        mismatches = int(((ctx_df[look_for_name] == 1) & (~mask)).sum())
+        mask_known = state_names != "UNKNOWN"
+        
+        mismatches = int(((ctx_df[look_for_name] == 1) & (~mask) & mask_known).sum())
         if mismatches:
             look_for_mismatches[look_for_name] = mismatches
-        ctx_df.loc[~mask, look_for_name] = 0
+        
+        ctx_df.loc[(~mask) | (~mask_known), look_for_name] = 0
     if look_for_cols:
         ctx_df[look_for_cols] = ctx_df[look_for_cols].fillna(0).astype(int)
     if look_for_mismatches:
