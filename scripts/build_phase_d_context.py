@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -30,12 +31,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start", required=True, help="Fecha inicio (YYYY-MM-DD)")
     parser.add_argument("--end", required=True, help="Fecha fin (YYYY-MM-DD)")
     parser.add_argument(
-        "--context-tf",
+        "--timeframe",
         required=True,
         choices=["H1", "H2"],
         help="Timeframe base del State Engine (H1 o H2)",
     )
-    parser.add_argument("--model-path", required=True, help="Ruta al modelo .pkl")
+    parser.add_argument(
+        "--model-path",
+        required=True,
+        help="Ruta base de modelos .pkl (el archivo se resuelve por símbolo)",
+    )
+    parser.add_argument(
+        "--window-hours",
+        required=True,
+        type=int,
+        help="Ventana temporal (horas) para features/quality en TF base",
+    )
     parser.add_argument(
         "--output-dir",
         default=str(PROJECT_ROOT / "outputs" / "phase_d_context"),
@@ -68,24 +79,6 @@ def load_symbol_config(symbol: str, logger: logging.Logger) -> dict:
     return config if isinstance(config, dict) else {}
 
 
-def active_look_fors(symbol_cfg: dict | None) -> list[str]:
-    if not isinstance(symbol_cfg, dict):
-        return []
-    phase_d = symbol_cfg.get("phase_d")
-    if not isinstance(phase_d, dict) or not phase_d.get("enabled", False):
-        return []
-    look_fors = phase_d.get("look_fors")
-    if not isinstance(look_fors, dict):
-        return []
-    return sorted(
-        [
-            name
-            for name, cfg in look_fors.items()
-            if isinstance(cfg, dict) and cfg.get("enabled", False)
-        ]
-    )
-
-
 def safe_filename(text: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in text)
 
@@ -95,19 +88,34 @@ def main() -> None:
     logger = setup_logging()
 
     symbol = args.symbol
-    context_tf = args.context_tf.upper()
+    context_tf = args.timeframe.upper()
     start = pd.to_datetime(args.start)
     end = pd.to_datetime(args.end)
+    bars_per_hour = {"H1": 1, "H2": 0.5}
+    derived_bars = math.ceil(args.window_hours * bars_per_hour[context_tf])
+    if derived_bars < 4:
+        raise ValueError(f"Context window too small: {derived_bars} bars (min=4).")
+    logger.info(
+        "window_hours=%s context_tf=%s derived_bars=%s",
+        args.window_hours,
+        context_tf,
+        derived_bars,
+    )
 
     logger.info("download start symbol=%s tf=%s", symbol, context_tf)
     connector = MT5Connector()
     ohlcv_ctx = connector.obtener_ohlcv(symbol, context_tf, start, end)
     logger.info("download done rows=%s", len(ohlcv_ctx))
 
-    logger.info("predict start model_path=%s", args.model_path)
+    model_root = Path(args.model_path)
+    if model_root.is_dir() or model_root.suffix.lower() != ".pkl":
+        model_path = model_root / f"{safe_filename(symbol)}_state_engine.pkl"
+    else:
+        model_path = model_root
+    logger.info("predict start model_path=%s", model_path)
     model = StateEngineModel()
-    model.load(args.model_path)
-    feature_engineer = FeatureEngineer(FeatureConfig())
+    model.load(model_path)
+    feature_engineer = FeatureEngineer(FeatureConfig(window=derived_bars))
     full_features = feature_engineer.compute_features(ohlcv_ctx)
     features = feature_engineer.training_features(full_features)
     outputs = model.predict_outputs(features)
