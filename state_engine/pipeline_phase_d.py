@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from pathlib import Path
+import re
 from typing import Any, Iterable
 
 import pandas as pd
@@ -12,7 +13,9 @@ import pandas as pd
 from .context_features import build_context_features
 from .features import FeatureEngineer
 from .gating import GatingPolicy, LOOK_FOR_COLUMN_CANDIDATES, resolve_look_for_column_map
+from .labels import StateLabels
 from .model import StateEngineModel
+from .quality import QUALITY_LABEL_UNCLASSIFIED
 
 
 @dataclass(frozen=True)
@@ -67,6 +70,52 @@ def _active_look_for_filters(symbol_cfg: dict | None) -> list[str]:
             if isinstance(rule_cfg, dict) and rule_cfg.get("enabled", False)
         ]
     )
+
+
+def _look_for_base_state_map(symbol_cfg: dict | None) -> dict[str, str]:
+    if not isinstance(symbol_cfg, dict):
+        return {}
+    phase_d = symbol_cfg.get("phase_d")
+    if not isinstance(phase_d, dict):
+        return {}
+    look_for_cfg = phase_d.get("look_fors")
+    if not isinstance(look_for_cfg, dict):
+        return {}
+    base_state_map: dict[str, str] = {}
+    for look_for_name, rule_cfg in look_for_cfg.items():
+        if not isinstance(rule_cfg, dict):
+            continue
+        base_state = rule_cfg.get("base_state") or rule_cfg.get("anchor_state")
+        if base_state is None:
+            continue
+        base_state_map[look_for_name] = str(base_state).strip().lower()
+    return base_state_map
+
+
+def _infer_base_state_from_name(look_for_name: str) -> str | None:
+    match = re.search(r"look_for_(balance|transition|trend)(?:_|$)", look_for_name.lower())
+    if match:
+        return match.group(1)
+    return None
+
+
+def _normalize_state_labels(state_hat: pd.Series) -> pd.Series:
+    mapping = {
+        StateLabels.BALANCE: "BALANCE",
+        StateLabels.TRANSITION: "TRANSITION",
+        StateLabels.TREND: "TREND",
+        int(StateLabels.BALANCE): "BALANCE",
+        int(StateLabels.TRANSITION): "TRANSITION",
+        int(StateLabels.TREND): "TREND",
+        "balance": "BALANCE",
+        "transition": "TRANSITION",
+        "trend": "TREND",
+        "BALANCE": "BALANCE",
+        "TRANSITION": "TRANSITION",
+        "TREND": "TREND",
+    }
+    normalized = state_hat.map(mapping)
+    return normalized.fillna("UNKNOWN")
 
 
 def validate_look_for_context_requirements(
@@ -292,10 +341,64 @@ def build_context_bundle(
     )
     ctx_features = ctx_features.loc[:, ~ctx_features.columns.duplicated()]
     ctx_df = pd.concat([outputs[["state_hat", "margin"]], ctx_features, allows], axis=1)
-    ctx_df = ctx_df.loc[:, ~ctx_df.columns.duplicated()].shift(1)
+    if "quality_label" in outputs.columns:
+        ctx_df["quality_label"] = outputs["quality_label"]
+    ctx_df = ctx_df.loc[:, ~ctx_df.columns.duplicated()]
     look_for_cols = [col for col in ctx_df.columns if col.startswith("LOOK_FOR_")]
+    ctx_cols = ["state_hat"]
+    if "margin" in ctx_df.columns:
+        ctx_cols.append("margin")
+    ctx_cols += [col for col in ctx_df.columns if col.startswith("ctx_")]
+    ctx_cols += look_for_cols
+    if "quality_label" in ctx_df.columns:
+        ctx_cols.append("quality_label")
+    do_causal_shift = score_tf != context_tf
+    logger.info(
+        "Phase D causal shift | symbol=%s context_tf=%s score_tf=%s do_shift=%s ctx_cols=%s",
+        symbol,
+        context_tf,
+        score_tf,
+        do_causal_shift,
+        ctx_cols,
+    )
+    if do_causal_shift:
+        ctx_df[ctx_cols] = ctx_df[ctx_cols].shift(1)
+    state_names = _normalize_state_labels(ctx_df["state_hat"])
+    if "quality_label" in ctx_df.columns:
+        quality_series = ctx_df["quality_label"]
+    else:
+        quality_series = pd.Series(pd.NA, index=ctx_df.index, dtype=object)
+    quality_label_full = quality_series.where(
+        (~quality_series.isna()) & (quality_series != QUALITY_LABEL_UNCLASSIFIED),
+        state_names + f"_{QUALITY_LABEL_UNCLASSIFIED}",
+    )
+    ctx_df["quality_label_full"] = quality_label_full
+    if ctx_df["quality_label_full"].isna().any():
+        raise ValueError("quality_label_full contains NaN values in Phase D context.")
+    look_for_base_map = _look_for_base_state_map(symbol_cfg)
+    look_for_mismatches: dict[str, int] = {}
+    for look_for_name in look_for_cols:
+        base_state = look_for_base_map.get(look_for_name) or _infer_base_state_from_name(
+            look_for_name
+        )
+        if base_state is None or base_state == "any":
+            continue
+        base_state_norm = base_state.strip().upper()
+        mask = state_names == base_state_norm
+        mismatches = int(((ctx_df[look_for_name] == 1) & (~mask)).sum())
+        if mismatches:
+            look_for_mismatches[look_for_name] = mismatches
+        ctx_df.loc[~mask, look_for_name] = 0
     if look_for_cols:
         ctx_df[look_for_cols] = ctx_df[look_for_cols].fillna(0).astype(int)
+    if look_for_mismatches:
+        raise ValueError(
+            "LOOK_FOR base state mismatch after enforcement: "
+            + "; ".join(
+                f"{look_for_name} mismatches={count}"
+                for look_for_name, count in sorted(look_for_mismatches.items())
+            )
+        )
 
     active_look_fors = _active_look_for_filters(symbol_cfg)
     look_for_rates = validate_look_for_columns(ctx_df, active_look_fors, logger=logger)
