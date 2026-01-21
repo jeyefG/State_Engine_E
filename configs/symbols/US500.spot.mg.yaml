@@ -1,0 +1,110 @@
+# -------------------------------------------------
+# Phase D LOOK_FOR (US500) v2
+# Descriptive narratives (no signal, no edge)
+# Goal: clear archetypes + split stability + low collision (low Jaccard)
+# Changes vs v1:
+# - Remove LOOK_FOR_transition_failed_breakout (N too low)
+# - Collapse TRANSITION to one narrative "resolution"
+# - Add a second BALANCE "inventory_reset" to capture directional balance
+# - Keep TREND "orderly_pullback" (already solid)
+# -------------------------------------------------
+
+phase_d:
+  enabled: true
+  look_fors:
+
+    LOOK_FOR_balance_compression:
+      enabled: true
+      base_state: BALANCE
+      require_all: true
+      state_age_min: 2
+      state_age_max: 8
+      dist_vwap_atr_max: 0.4
+      reentry_min: 1
+
+    LOOK_FOR_balance_inventory_reset:
+      enabled: true
+      base_state: BALANCE
+      require_all: true
+      state_age_min: 6
+      dist_vwap_atr_min: 0.4
+      dist_vwap_atr_max: 0.9
+
+    LOOK_FOR_transition_resolution:
+      enabled: true
+      base_state: TRANSITION
+      require_all: true
+      state_age_max: 6
+      breakmag_min: 0.3
+
+    LOOK_FOR_trend_orderly_pullback:
+      enabled: true
+      base_state: TREND
+      require_all: true
+      state_age_min: 3
+      dist_vwap_atr_max: 1.0
+
+
+      
+#----------------------------------------------------------------
+#                   Fase E/Scorer
+#----------------------------------------------------------------    
+event_scorer:
+  score_tf: "M15"
+  allow_tf: "H2"
+  train_ratio: 0.8
+  reward_r: 1.0
+  sl_mult: 1.0
+  r_thr: 0.0
+  tie_break: "distance"
+  include_transition: true
+
+  meta_policy:
+    enabled: false
+    meta_margin_min: 0.10
+    meta_margin_max: 0.95
+
+  family_training:
+    min_samples_train: 200
+
+  decision_thresholds:
+    n_min: 200
+    winrate_min: 0.52
+    r_mean_min: 0.02
+    p10_min: -0.2
+
+  modes:
+    research:
+      enabled: false
+    
+      # ==========================================================
+      # EXPERIMENTO A: ¿TF scorer? (M5 vs M15)
+      # - NO thresholds grid
+      # - NO k_bars grid
+      # - features: SOLO session_bucket (base)
+      # - k_bars fijo equivalente por TF
+      # ==========================================================
+      experiment_A_tf_compare:
+        d1_anchor_hour: 22
+        features:
+          session_bucket: true
+          hour_bucket: false
+          trend_context_D1: false
+          vol_context: false
+
+        k_bars_by_tf:
+          M5: 24
+          M15: 8
+
+        decision_thresholds:
+          n_min: 200
+          winrate_min: 0.52
+          r_mean_min: 0.02
+          p10_min: -0.2
+
+        diagnostics:
+          min_calib_samples: 200
+          max_family_concentration: 0.6
+          min_temporal_dispersion: 0.3
+          max_score_tail_slope: 2.5
+

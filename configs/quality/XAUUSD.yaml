@@ -1,0 +1,11 @@
+thresholds:
+  er_high: 0.7
+  netmove_high: 1.1
+  break_high: 1.1
+  reentry_high: 5.5
+windows:
+  range_slope_k: 8
+  transition_failed_lookback: 6
+scoring:
+  score_min: 0.75
+  score_margin: 0.2

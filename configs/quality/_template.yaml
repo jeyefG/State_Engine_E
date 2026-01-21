@@ -1,0 +1,28 @@
+thresholds:
+  er_low: 0.2
+  er_mid: 0.4
+  er_high: 0.65
+  netmove_low: 0.3
+  netmove_mid: 0.6
+  netmove_high: 1.0
+  break_low: 0.25
+  break_mid: 0.6
+  break_high: 1.0
+  reentry_min: 2.0
+  reentry_mid: 3.0
+  reentry_high: 5.0
+  reentry_low: 1.0
+  reentry_max_for_stable: 3.0
+  inside_mid: 0.4
+  inside_high: 0.6
+  range_slope_min: -0.01
+  swing_mid: 3.0
+  swing_high: 5.0
+  close_mid_low: 0.4
+  close_mid_high: 0.6
+windows:
+  range_slope_k: 6
+  transition_failed_lookback: 5
+scoring:
+  score_min: 0.7
+  score_margin: 0.15

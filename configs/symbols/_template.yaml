@@ -1,0 +1,93 @@
+event_scorer:
+  score_tf: "M5"
+  allow_tf: "H1"
+  # context_tf overrides the State Engine metadata timeframe when needed.
+  # context_tf: "H2"
+  train_ratio: 0.8
+  k_bars: 24
+  k_bars_by_tf:
+    M5: 24
+    M15: 8
+  reward_r: 1.0
+  sl_mult: 1.0
+  r_thr: 0.0
+  tie_break: "distance"
+  include_transition: true
+  meta_policy:
+    enabled: true
+    meta_margin_min: 0.10
+    meta_margin_max: 0.95
+  family_training:
+    min_samples_train: 200
+  decision_thresholds:
+    n_min: 200
+    winrate_min: 0.52
+    r_mean_min: 0.02
+    p10_min: -0.2
+  modes:
+    research:
+      decision_thresholds:
+        n_min: 100
+        winrate_min: 0.50
+        r_mean_min: 0.02
+        p10_min: null
+    production:
+      decision_thresholds:
+        n_min: 200
+        winrate_min: 0.52
+        r_mean_min: 0.02
+        p10_min: -0.2
+  research:
+    enabled: false
+    d1_anchor_hour: 0
+    features:
+      session_bucket: false
+      hour_bucket: false
+      trend_context_D1: false
+      vol_context: false
+    k_bars_grid: []
+    k_bars_grid_by_tf:
+      M5: []
+      M15: []
+    exploration:
+      enabled: false
+      kind: "thresholds_only"
+      seed: 7
+      max_variants: 25
+      decision_thresholds_grid:
+        n_min: [200]
+        winrate_min: [0.52]
+        r_mean_min: [0.02]
+        p10_min: [-0.2]
+    diagnostics:
+      max_family_concentration: 0.6
+      min_temporal_dispersion: 0.3
+      max_score_tail_slope: 2.5
+      min_calib_samples: 200
+
+phase_d:
+  enabled: false
+  look_fors:
+    # Example LOOK_FOR filters (optional). Each LOOK_FOR_* block mirrors the gating filters in code.
+    LOOK_FOR_transition_failure:
+      enabled: false
+      base_state: transition
+      require_all: true
+      filters:
+        margin_min: 0.10
+        sessions_in: ["LONDON", "NY"]
+        state_age_max: 5
+        dist_vwap_atr_max: 1.5
+        breakmag_min: 0.25
+        reentry_min: 1.0
+
+diagnostic_tables:
+  n_min: 30
+  delta_max: 0.15
+  top_k: 12
+  bins:
+    state_age: [-.inf, 2, 5, 10, .inf]
+    dist_vwap_atr: [-.inf, 0.5, 1.0, 2.0, .inf]
+    breakmag: [-.inf, 0.5, 1.0, 1.5, 2.5, .inf]
+    reentry: [-.inf, 0.5, 1.5, 2.5, 4.5, .inf]
+    sessions: []
