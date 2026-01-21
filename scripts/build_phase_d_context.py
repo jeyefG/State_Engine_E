@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model-path",
-        required=True,
+        default=str(PROJECT_ROOT / "state_engine" / "models"),
         help="Ruta base de modelos .pkl (el archivo se resuelve por símbolo)",
     )
     parser.add_argument(
