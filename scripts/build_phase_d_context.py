@@ -9,6 +9,13 @@ from pathlib import Path
 
 import pandas as pd
 
+import sys
+
+# --- ensure project root is on PYTHONPATH ---
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from state_engine.config_loader import load_config
 from state_engine.features import FeatureConfig, FeatureEngineer
 from state_engine.gating import GatingPolicy
