@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import numpy as np
 from pathlib import Path
 
 import pandas as pd
@@ -92,6 +93,29 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="DEBUG: permitir quality_labels=None (no recomendado).",
     )
+
+    # -------------------------
+    # Phase E edge evaluation (state-conditional Y)
+    # -------------------------
+    parser.add_argument(
+        "--edge-k",
+        type=int,
+        default=None,
+        help="Horizon k (bars) for Phase E edge metrics. If omitted, uses a sensible default by score_tf.",
+    )
+    parser.add_argument(
+        "--edge-min-events",
+        type=int,
+        default=200,
+        help="Minimum number of events (rows) per group to show in filtered edge tables/logs.",
+    )
+    parser.add_argument(
+        "--edge-min-days",
+        type=int,
+        default=20,
+        help="Minimum number of distinct days per group to show in filtered edge tables/logs.",
+    )
+
     return parser.parse_args()
 
 
@@ -169,6 +193,220 @@ def _run_phase_d_audit(logger: logging.Logger, *, fail_on_audit: bool) -> None:
     if audit_failed and fail_on_audit:
         logger.error("Phase D audit failed; aborting (--fail-on-audit).")
         raise SystemExit(2)
+
+
+
+def _default_edge_k(score_tf: str) -> int:
+    """Heurística simple para elegir k (horizonte) por timeframe."""
+    tf = str(score_tf).upper().strip()
+    if tf == "M1":
+        return 60  # 1h
+    if tf == "M5":
+        return 24  # 2h
+    if tf == "M15":
+        return 8   # 2h
+    if tf == "M30":
+        return 4   # 2h
+    if tf == "H1":
+        return 2   # 2h
+    return 24
+
+
+def _add_date_col(df: pd.DataFrame) -> pd.DataFrame:
+    if "_date" not in df.columns:
+        df = df.copy()
+        df["_date"] = df.index.normalize()
+    return df
+
+
+def compute_state_conditional_edge_y(df: pd.DataFrame, k: int, logger: logging.Logger) -> pd.Series:
+    """
+    Crea un objetivo numérico *state-appropriate* por fila:
+
+      TREND      -> abs(log_return(t -> t+k))
+      BALANCE    -> realized_vol (sum_{i=1..k} logret^2)
+      TRANSITION -> range_excursion (max(high[t+1:t+k]) - min(low[t+1:t+k]))
+
+    Nota: se excluye la barra t del window futuro para evitar que la métrica
+    sea trivial (p.ej. excursion=0 si k=0).
+    """
+    if k < 1:
+        raise ValueError(f"edge_k must be >= 1 (got {k})")
+
+    required_cols = ["close", "high", "low", "base_state"]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns for Phase E edge metrics: {missing}")
+
+    close = df["close"].astype(float)
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+
+    # log-return base
+    log_close = np.log(close.replace(0, np.nan))
+    logret = log_close.diff()
+
+    # TREND: abs log return t -> t+k
+    y_trend = (log_close.shift(-k) - log_close).abs()
+
+    # BALANCE: realized volatility sum_{i=1..k} logret_{t+i}^2
+    # (shift(-i) because we want future returns)
+    rv = pd.Series(0.0, index=df.index)
+    for i in range(1, k + 1):
+        rv = rv.add(logret.shift(-i).pow(2), fill_value=np.nan)
+    y_balance = rv
+
+    # TRANSITION: forward range excursion over next k bars
+    # Use reversed rolling to compute forward window.
+    high_fwd_max = high.shift(-1)[::-1].rolling(k, min_periods=k).max()[::-1]
+    low_fwd_min = low.shift(-1)[::-1].rolling(k, min_periods=k).min()[::-1]
+    y_transition = high_fwd_max - low_fwd_min
+
+    # stitch into a single state-conditional objective
+    base_state = df["base_state"].astype(str)
+    y = pd.Series(np.nan, index=df.index, dtype=float)
+
+    y.loc[base_state == "TREND"] = y_trend.loc[base_state == "TREND"]
+    y.loc[base_state == "BALANCE"] = y_balance.loc[base_state == "BALANCE"]
+    y.loc[base_state == "TRANSITION"] = y_transition.loc[base_state == "TRANSITION"]
+
+    # quick sanity
+    nan_rate = float(y.isna().mean())
+    logger.info("Phase E edge_y computed | k=%s nan_rate=%.4f", k, nan_rate)
+
+    return y
+
+
+def build_edge_reports(
+    df_score_ctx: pd.DataFrame,
+    symbol: str,
+    score_tf: str,
+    edge_k: int,
+    logger: logging.Logger,
+    min_events: int = 200,
+    min_days: int = 20,
+) -> dict[str, pd.DataFrame]:
+    """
+    Produce tablas de edge (sin entrenar, solo estadística descriptiva) para:
+      - baseline por estado
+      - baseline por estado+QL
+      - eventos LOOK_FOR por estado
+      - eventos LOOK_FOR por estado+QL
+
+    El "edge" acá es uplift vs baseline (misma partición de estado/QL).
+    """
+    df = _add_date_col(df_score_ctx)
+
+    # Ensure needed columns exist
+    if "quality_label_full" not in df.columns:
+        df = df.copy()
+        df["quality_label_full"] = df["base_state"].astype(str) + "_UNCLASSIFIED"
+
+    look_for_cols = [c for c in df.columns if c.startswith("LOOK_FOR_")]
+
+    # compute Y
+    df = df.copy()
+    df["edge_y"] = compute_state_conditional_edge_y(df, edge_k, logger)
+
+    # helper agg
+    def _agg(g: pd.DataFrame) -> pd.Series:
+        y = g["edge_y"]
+        return pd.Series(
+            {
+                "n_bars": int(len(g)),
+                "n_days": int(g["_date"].nunique()),
+                "bars_per_day": float(len(g) / g["_date"].nunique()) if g["_date"].nunique() else 0.0,
+                "y_mean": float(y.mean()),
+                "y_median": float(y.median()),
+                "y_p75": float(y.quantile(0.75)),
+                "y_p90": float(y.quantile(0.90)),
+                "y_std": float(y.std(ddof=1)),
+                "y_nan_rate": float(y.isna().mean()),
+            }
+        )
+
+    # Baselines
+    base_cols_state = ["base_state"]
+    base_cols_ql = ["base_state", "quality_label_full"]
+
+    baseline_state = df.groupby(base_cols_state, dropna=False).apply(_agg).reset_index()
+    baseline_state.insert(0, "symbol", symbol)
+    baseline_state.insert(1, "score_tf", score_tf)
+
+    baseline_ql = df.groupby(base_cols_ql, dropna=False).apply(_agg).reset_index()
+    baseline_ql.insert(0, "symbol", symbol)
+    baseline_ql.insert(1, "score_tf", score_tf)
+
+    # LOOK_FOR event tables (compare to baselines)
+    lookfor_state_rows: list[pd.DataFrame] = []
+    lookfor_ql_rows: list[pd.DataFrame] = []
+
+    for lf in look_for_cols:
+        ev = df[df[lf] == 1]
+        if ev.empty:
+            continue
+
+        ev_state = ev.groupby(base_cols_state, dropna=False).apply(_agg).reset_index()
+        ev_state.insert(0, "look_for_rule", lf)
+        ev_state = ev_state.merge(
+            baseline_state[["base_state", "y_mean"]].rename(columns={"y_mean": "baseline_y_mean"}),
+            on="base_state",
+            how="left",
+        )
+        ev_state["uplift"] = ev_state["y_mean"] - ev_state["baseline_y_mean"]
+        ev_state["uplift_pct"] = ev_state["uplift"] / ev_state["baseline_y_mean"].replace(0, np.nan)
+        ev_state.insert(0, "score_tf", score_tf)
+        ev_state.insert(0, "symbol", symbol)
+        lookfor_state_rows.append(ev_state)
+
+        ev_ql = ev.groupby(base_cols_ql, dropna=False).apply(_agg).reset_index()
+        ev_ql.insert(0, "look_for_rule", lf)
+        ev_ql = ev_ql.merge(
+            baseline_ql[["base_state", "quality_label_full", "y_mean"]].rename(columns={"y_mean": "baseline_y_mean"}),
+            on=["base_state", "quality_label_full"],
+            how="left",
+        )
+        ev_ql["uplift"] = ev_ql["y_mean"] - ev_ql["baseline_y_mean"]
+        ev_ql["uplift_pct"] = ev_ql["uplift"] / ev_ql["baseline_y_mean"].replace(0, np.nan)
+        ev_ql.insert(0, "score_tf", score_tf)
+        ev_ql.insert(0, "symbol", symbol)
+        lookfor_ql_rows.append(ev_ql)
+
+    lookfor_state = pd.concat(lookfor_state_rows, ignore_index=True) if lookfor_state_rows else pd.DataFrame()
+    lookfor_ql = pd.concat(lookfor_ql_rows, ignore_index=True) if lookfor_ql_rows else pd.DataFrame()
+
+    # light filtering for readability (does not affect raw exports)
+    def _filter(df_in: pd.DataFrame) -> pd.DataFrame:
+        if df_in.empty:
+            return df_in
+        return df_in[(df_in["n_bars"] >= min_events) & (df_in["n_days"] >= min_days)].copy()
+
+    lookfor_state_f = _filter(lookfor_state)
+    lookfor_ql_f = _filter(lookfor_ql)
+
+    # Logging: top uplift candidates (filtered)
+    if not lookfor_state_f.empty:
+        top = (
+            lookfor_state_f.sort_values(["uplift_pct", "n_bars"], ascending=[False, False])
+            .head(10)[["look_for_rule", "base_state", "n_bars", "n_days", "y_mean", "baseline_y_mean", "uplift_pct"]]
+        )
+        logger.info("Phase E edge top (state-level, filtered):\n%s", top.to_string(index=False))
+
+    if not lookfor_ql_f.empty:
+        top = (
+            lookfor_ql_f.sort_values(["uplift_pct", "n_bars"], ascending=[False, False])
+            .head(10)[["look_for_rule", "base_state", "quality_label_full", "n_bars", "n_days", "y_mean", "baseline_y_mean", "uplift_pct"]]
+        )
+        logger.info("Phase E edge top (state+QL, filtered):\n%s", top.to_string(index=False))
+
+    return {
+        "baseline_state": baseline_state,
+        "baseline_state_ql": baseline_ql,
+        "lookfor_state": lookfor_state,
+        "lookfor_state_ql": lookfor_ql,
+        "lookfor_state_filtered": lookfor_state_f,
+        "lookfor_state_ql_filtered": lookfor_ql_f,
+    }
 
 
 def main() -> None:
@@ -341,6 +579,21 @@ def main() -> None:
             df_score_ctx["quality_label_full"].value_counts().head(10).to_string(),
         )
         logger.info("Phase E pct_any_lookfor=%.2f%%", float(any_lookfor.mean() * 100.0))
+
+        # -------------------------
+        # Phase E: state-conditional edge evaluation (no training, just stats)
+        # -------------------------
+        edge_k = args.edge_k if args.edge_k is not None else _default_edge_k(score_tf)
+        edge_reports = build_edge_reports(
+            df_score_ctx=df_score_ctx,
+            symbol=symbol,
+            score_tf=score_tf,
+            edge_k=edge_k,
+            logger=logger,
+            min_events=args.edge_min_events,
+            min_days=args.edge_min_days,
+        )
+
         distinct_pairs = (
             df_score_ctx[["base_state", "quality_label_full"]]
             .drop_duplicates()
@@ -389,6 +642,26 @@ def main() -> None:
         logger.info("Phase E export lookfor=%s", lookfor_path)
         if not coverage_df.empty:
             logger.info("Phase E export coverage=%s", coverage_path)
+
+        # Export Phase E edge reports (baseline + LOOK_FOR uplift)
+        edge_base = Path(f"{output_base}_edge").resolve()
+
+        edge_reports["baseline_state"].to_csv(edge_base.with_name(edge_base.name + "_baseline_state.csv"), index=False)
+        edge_reports["baseline_state_ql"].to_csv(edge_base.with_name(edge_base.name + "_baseline_state_ql.csv"), index=False)
+
+        if not edge_reports["lookfor_state"].empty:
+            edge_reports["lookfor_state"].to_csv(edge_base.with_name(edge_base.name + "_lookfor_state.csv"), index=False)
+        if not edge_reports["lookfor_state_ql"].empty:
+            edge_reports["lookfor_state_ql"].to_csv(edge_base.with_name(edge_base.name + "_lookfor_state_ql.csv"), index=False)
+
+        if not edge_reports["lookfor_state_filtered"].empty:
+            edge_reports["lookfor_state_filtered"].to_csv(edge_base.with_name(edge_base.name + "_lookfor_state_filtered.csv"), index=False)
+        if not edge_reports["lookfor_state_ql_filtered"].empty:
+            edge_reports["lookfor_state_ql_filtered"].to_csv(edge_base.with_name(edge_base.name + "_lookfor_state_ql_filtered.csv"), index=False)
+
+        logger.info("Phase E export edge baseline_state=%s", edge_base.with_name(edge_base.name + "_baseline_state.csv"))
+        logger.info("Phase E export edge baseline_state_ql=%s", edge_base.with_name(edge_base.name + "_baseline_state_ql.csv"))
+
 
 
 if __name__ == "__main__":
