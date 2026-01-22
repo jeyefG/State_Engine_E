@@ -390,11 +390,19 @@ def build_context_bundle(
         quality_str = quality_series.astype(str)
         known_state = state_names != "UNKNOWN"
         classified = quality_str != QUALITY_LABEL_UNCLASSIFIED
-        mismatches = classified & known_state & (~quality_str.str.startswith(state_names))
+        # Compare quality prefix (BALANCE/TRANSITION/TREND) vs base_state (derived from state_names)
+        base_state = state_names.astype(str).str.extract(r"^(BALANCE|TRANSITION|TREND)", expand=False)
+        quality_prefix = quality_str.str.extract(r"^(BALANCE|TRANSITION|TREND)_", expand=False)
+        
+        has_prefix = quality_prefix.notna()
+        known_base = base_state.notna()
+        classified = quality_str != QUALITY_LABEL_UNCLASSIFIED
+        
+        mismatches = classified & has_prefix & known_base & (quality_prefix != base_state)
         mismatch_rate = float(mismatches.mean()) if len(mismatches) else 0.0
         if mismatch_rate > 0.001:
             raise ValueError(
-                "Phase D quality/state mismatch above threshold: "
+                "Phase D quality/base_state mismatch above threshold: "
                 f"pct_bad={mismatch_rate * 100:.3f}%"
             )
     look_for_base_map = _look_for_base_state_map(symbol_cfg)
