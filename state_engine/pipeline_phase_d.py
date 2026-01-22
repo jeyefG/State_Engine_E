@@ -314,6 +314,8 @@ def build_context_bundle(
     symbol_cfg: dict | None,
     phase_e: bool,
     logger: logging.Logger,
+    quality_labels: pd.Series | None = None,
+    causal_shift: bool | None = None,
 ) -> ContextBundle:
     """Build canonical Phase D context and merge into score timeframe."""
     full_features = feature_engineer.compute_features(ohlcv_ctx)
@@ -341,7 +343,10 @@ def build_context_bundle(
     )
     ctx_features = ctx_features.loc[:, ~ctx_features.columns.duplicated()]
     ctx_df = pd.concat([outputs[["state_hat", "margin"]], ctx_features, allows], axis=1)
-    if "quality_label" in outputs.columns:
+    if quality_labels is not None:
+        quality_aligned = quality_labels.reindex(outputs.index)
+        ctx_df["quality_label"] = quality_aligned.fillna(QUALITY_LABEL_UNCLASSIFIED)
+    elif "quality_label" in outputs.columns:
         ctx_df["quality_label"] = outputs["quality_label"]
     ctx_df = ctx_df.loc[:, ~ctx_df.columns.duplicated()]
     look_for_cols = [col for col in ctx_df.columns if col.startswith("LOOK_FOR_")]
@@ -352,7 +357,7 @@ def build_context_bundle(
     ctx_cols += look_for_cols
     if "quality_label" in ctx_df.columns:
         ctx_cols.append("quality_label")
-    do_causal_shift = score_tf != context_tf
+    do_causal_shift = (score_tf != context_tf) if causal_shift is None else bool(causal_shift)
     logger.info(
         "Phase D causal shift | symbol=%s context_tf=%s score_tf=%s do_shift=%s ctx_cols=%s",
         symbol,
@@ -363,6 +368,12 @@ def build_context_bundle(
     )
     if do_causal_shift:
         ctx_df[ctx_cols] = ctx_df[ctx_cols].shift(1)
+    if not do_causal_shift:
+        first_state = ctx_df["state_hat"].iloc[0]
+        if pd.isna(first_state):
+            raise ValueError(
+                "Phase D context misalignment: state_hat has NaN in first row without causal shift."
+            )
     state_names = _normalize_state_labels(ctx_df["state_hat"])
     if "quality_label" in ctx_df.columns:
         quality_series = ctx_df["quality_label"]
@@ -375,6 +386,17 @@ def build_context_bundle(
     ctx_df["quality_label_full"] = quality_label_full
     if ctx_df["quality_label_full"].isna().any():
         raise ValueError("quality_label_full contains NaN values in Phase D context.")
+    if "quality_label" in ctx_df.columns:
+        quality_str = quality_series.astype(str)
+        known_state = state_names != "UNKNOWN"
+        classified = quality_str != QUALITY_LABEL_UNCLASSIFIED
+        mismatches = classified & known_state & (~quality_str.str.startswith(state_names))
+        mismatch_rate = float(mismatches.mean()) if len(mismatches) else 0.0
+        if mismatch_rate > 0.001:
+            raise ValueError(
+                "Phase D quality/state mismatch above threshold: "
+                f"pct_bad={mismatch_rate * 100:.3f}%"
+            )
     look_for_base_map = _look_for_base_state_map(symbol_cfg)
     look_for_mismatches: dict[str, int] = {}
     for look_for_name in look_for_cols:

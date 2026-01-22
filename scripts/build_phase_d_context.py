@@ -23,7 +23,6 @@ from state_engine.model import StateEngineModel
 from state_engine.mt5_connector import MT5Connector
 from state_engine.pipeline_phase_d import build_context_bundle
 from state_engine.quality import (
-    QUALITY_LABEL_UNCLASSIFIED,
     assign_quality_labels,
     load_quality_config,
 )
@@ -156,12 +155,10 @@ def main() -> None:
         symbol_cfg=symbol_cfg,
         phase_e=False,
         logger=logger,
+        quality_labels=quality_labels,
     )
     ctx_df = context_bundle.ctx_df.copy()
     logger.info("look_for done")
-
-    quality_aligned = quality_labels.reindex(ctx_df.index)
-    ctx_df["quality_label"] = quality_aligned.fillna(QUALITY_LABEL_UNCLASSIFIED)
 
     look_for_cols = [col for col in ctx_df.columns if col.startswith("LOOK_FOR_")]
     if look_for_cols:
