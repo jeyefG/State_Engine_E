@@ -352,17 +352,8 @@ def main() -> None:
             distinct_pairs.to_string(index=False),
         )
 
-        universe_summary = (
-            df_score_ctx.groupby(["base_state", "quality_label_full"])
-            .size()
-            .reset_index(name="events_total")
-        )
-        lookfor_summary = (
-            df_score_ctx.loc[any_lookfor]
-            .groupby(["base_state", "quality_label_full"])
-            .size()
-            .reset_index(name="events_total")
-        )
+        universe_events = df_score_ctx.copy()
+        lookfor_events = df_score_ctx.loc[any_lookfor].copy()
 
         coverage_df = pd.DataFrame()
         if look_for_cols:
@@ -389,8 +380,8 @@ def main() -> None:
         lookfor_path = Path(f"{output_base}_lookfor.csv").resolve()
         coverage_path = Path(f"{output_base}_coverage.csv").resolve()
 
-        universe_summary.to_csv(universe_path, index=False)
-        lookfor_summary.to_csv(lookfor_path, index=False)
+        universe_events.to_csv(universe_path, index=False)
+        lookfor_events.to_csv(lookfor_path, index=False)
         if not coverage_df.empty:
             coverage_df.to_csv(coverage_path, index=False)
 
