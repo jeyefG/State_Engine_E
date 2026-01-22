@@ -1,4 +1,4 @@
-"""Build canonical Phase D context at the State Engine base timeframe. Back Up"""
+"""Build canonical Phase D context at the State Engine base timeframe"""
 
 from __future__ import annotations
 
